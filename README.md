@@ -20,3 +20,11 @@ npm start
 3. 自動で検索 → 全ページ巡回 → 詳細確認 → PDF保存
 
 期間や文字列は環境変数で変更可: `FROM=2026/10/01 TO=2026/10/31 npm start`
+
+## 自動実行（毎月1日12:00・前月分・Googleドライブへ保存）
+```bash
+node save_darts_pdf.js --install-schedule   # 登録（1回だけ）
+launchctl kickstart gui/$(id -u)/com.smaregi.darts   # 今すぐ試す
+```
+ログ: `~/Library/Logs/smaregi_darts.log`
+保存先: 共有ドライブ/…/POSスマレジ/プラフィーノカフェ/年/年月/

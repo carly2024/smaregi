@@ -6,15 +6,67 @@ const os = require('os');
 const fs = require('fs');
 const readline = require('readline');
 
+const { execFileSync } = require('child_process');
+
 // ===== 設定 =====
-const FROM = process.env.FROM || '2026/09/01';
-const TO = process.env.TO || '2026/09/30';
+const AUTO = process.env.AUTO === '1'; // 自動実行モード（Enter待ちなし・前月を処理・Googleドライブへ保存）
+const pad = (n) => String(n).padStart(2, '0');
+const fmt = (d) => `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())}`;
+function prevMonthRange() {
+  const now = new Date();
+  return [fmt(new Date(now.getFullYear(), now.getMonth() - 1, 1)), fmt(new Date(now.getFullYear(), now.getMonth(), 0))];
+}
+const [PREV_FROM, PREV_TO] = prevMonthRange();
+const FROM = process.env.FROM || (AUTO ? PREV_FROM : '2026/09/01');
+const TO = process.env.TO || (AUTO ? PREV_TO : '2026/09/30');
 const KEYWORD = process.env.KEYWORD || 'ダーツ';
-const STORE_LABEL = 'FINO cafe（ダーツ投げ放題）';
 const LIST_URL = 'https://www1.smaregi.jp/control/transaction/';
 const OUT_DIR = process.env.OUT_DIR || path.join(os.homedir(), 'Downloads', 'smaregi_darts');
 const PROFILE_DIR = path.join(__dirname, '.browser-profile'); // ログイン状態を保持
+// Googleドライブ（Google Drive for desktop）内の保存先。この下に「年/年月」フォルダを作って入れる
+const DRIVE_SUBPATH = ['共有ドライブ', 'ナスダック上場関連資料まとめ (Nasdaq)', 'Quickbook', 'cash book', 'sales cash (現金売上)', 'POSスマレジ', 'プラフィーノカフェ'];
+const SAVE_TO_DRIVE = AUTO || process.env.DRIVE === '1';
 // ================
+
+// 文字の表記ゆれ（濁点の形・全角半角・空白）を無視して比較する
+const norm = (s) => s.normalize('NFKC').replace(/\s+/g, '');
+function findChild(dir, name) {
+  try {
+    return fs.readdirSync(dir).find((n) => norm(n) === norm(name));
+  } catch (e) {
+    return undefined;
+  }
+}
+function resolveDriveRoot() {
+  const base = path.join(os.homedir(), 'Library', 'CloudStorage');
+  let accounts = [];
+  try { accounts = fs.readdirSync(base).filter((n) => n.startsWith('GoogleDrive-')); } catch (e) {}
+  for (const acc of accounts) {
+    let cur = path.join(base, acc);
+    let ok = true;
+    for (const seg of DRIVE_SUBPATH) {
+      const hit = findChild(cur, seg);
+      if (!hit) { ok = false; break; }
+      cur = path.join(cur, hit);
+    }
+    if (ok) return cur;
+  }
+  return null;
+}
+function driveDest(root, date) {
+  let cur = root;
+  for (const seg of [date.slice(0, 4), date.slice(0, 6)]) {
+    const hit = findChild(cur, seg);
+    cur = path.join(cur, hit || seg);
+    fs.mkdirSync(cur, { recursive: true });
+  }
+  return cur;
+}
+function notify(msg) {
+  try {
+    execFileSync('osascript', ['-e', `display notification "${msg.replace(/"/g, '')}" with title "スマレジ ダーツPDF"`]);
+  } catch (e) {}
+}
 
 const CIRCLED = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'.split('');
 const circled = (n) => CIRCLED[n - 1] || `(${n})`;
@@ -104,17 +156,61 @@ async function savePdf(page, file) {
   });
 }
 
+function installSchedule() {
+  const label = 'com.smaregi.darts';
+  const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', `${label}.plist`);
+  const log = path.join(os.homedir(), 'Library', 'Logs', 'smaregi_darts.log');
+  fs.mkdirSync(path.dirname(plist), { recursive: true });
+  fs.writeFileSync(plist, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>${label}</string>
+<key>ProgramArguments</key><array><string>${process.execPath}</string><string>${__filename}</string></array>
+<key>WorkingDirectory</key><string>${__dirname}</string>
+<key>EnvironmentVariables</key><dict><key>AUTO</key><string>1</string></dict>
+<key>StartCalendarInterval</key><dict><key>Day</key><integer>1</integer><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
+<key>StandardOutPath</key><string>${log}</string>
+<key>StandardErrorPath</key><string>${log}</string>
+</dict></plist>
+`);
+  const uid = String(process.getuid());
+  try { execFileSync('launchctl', ['bootout', `gui/${uid}/${label}`], { stdio: 'ignore' }); } catch (e) {}
+  execFileSync('launchctl', ['bootstrap', `gui/${uid}`, plist]);
+  console.log('登録しました: 毎月1日 12:00 に前月分を自動実行します。');
+  console.log('ログ:', log);
+  console.log('今すぐ試すには:  launchctl kickstart gui/' + uid + '/' + label);
+}
+
+if (process.argv.includes('--install-schedule')) {
+  installSchedule();
+  process.exit(0);
+}
+
 (async () => {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
-    headless: false,
+    headless: AUTO && process.env.HEADED !== '1',
     viewport: { width: 1400, height: 1000 },
   });
   const page = ctx.pages()[0] || (await ctx.newPage());
   await page.goto(LIST_URL);
-  console.log('\nブラウザでスマレジにログインし、「取引履歴一覧」が表示された状態にしてください。');
-  await ask('表示できたら Enter を押してください > ');
-  if (!page.url().includes('/control/transaction')) await page.goto(LIST_URL);
+  if (!AUTO) {
+    console.log('\nブラウザでスマレジにログインし、「取引履歴一覧」が表示された状態にしてください。');
+    await ask('表示できたら Enter を押してください > ');
+    if (!page.url().includes('/control/transaction')) await page.goto(LIST_URL);
+  } else {
+    console.log(`\n[${new Date().toLocaleString('ja-JP')}] 自動実行: ${FROM} 〜 ${TO}`);
+    await page.waitForLoadState('networkidle');
+    if (!page.url().includes('/control/transaction')) {
+      throw new Error('スマレジのログインが切れています。手動で npm start を実行してログインし直してください。');
+    }
+  }
+  let driveRoot = null;
+  if (SAVE_TO_DRIVE) {
+    driveRoot = resolveDriveRoot();
+    if (!driveRoot) throw new Error('Googleドライブの保存先フォルダが見つかりません（Google Drive for desktop が起動していますか？）');
+    console.log('Googleドライブ保存先:', driveRoot);
+  }
 
   await setDatesAndSearch(page);
   const rows = await collectAll(page);
@@ -151,7 +247,17 @@ async function savePdf(page, file) {
       const name = `${date}_スマレジ売上_FINO cafe（ダーツ投げ放題${suffix}）.pdf`;
       fs.renameSync(h.tmp, path.join(OUT_DIR, name));
       console.log('保存:', name);
+      if (driveRoot && h.date) {
+        const dest = driveDest(driveRoot, h.date);
+        fs.copyFileSync(path.join(OUT_DIR, name), path.join(dest, name));
+        console.log('  → Googleドライブ:', path.basename(dest));
+      }
     });
   }
   console.log(`\n完了: ${hits.length}件 → ${OUT_DIR}`);
-})().catch((e) => { console.error(e); process.exit(1); });
+  if (AUTO) notify(`${FROM}〜${TO}: ${hits.length}件を保存しました`);
+})().catch((e) => {
+  console.error(e);
+  if (AUTO) notify('失敗しました: ' + e.message.slice(0, 80));
+  process.exit(1);
+});
