@@ -1,0 +1,13 @@
+{
+  "name": "smaregi-darts-pdf",
+  "version": "1.0.0",
+  "private": true,
+  "description": "スマレジ取引履歴から「ダーツ」を含む取引詳細をPDF保存する",
+  "scripts": {
+    "setup": "playwright install chromium",
+    "start": "node save_darts_pdf.js"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  }
+}
